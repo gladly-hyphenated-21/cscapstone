@@ -1,109 +1,195 @@
-#login sesame
-from vosk import Model, KaldiRecognizer, SetLogLevel
-import pyaudio
+#!/usr/bin/env python3
+"""
+Voice-based Login System
+
+This script implements a voice-based authentication system using the Vosk speech recognition model.
+It can process both real-time audio input and pre-recorded WAV files.
+
+usage: ./login.py <optinal: .wav file> 
+"""
+
 import os
 import sys
 import wave
 import json
+import logging
+import hashlib
+from typing import Optional
+from pathlib import Path
+from dataclasses import dataclass
+
+from vosk import Model, KaldiRecognizer, SetLogLevel
 import pyaudio
 import subprocess
-import hashlib
-print("[info] imports done")
 
-var_audiofromfile = False
-var_testingmode = False
-var_printguesses = True
-var_filename = 'audio.wav'
-var_secret = 'three'
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-for arg in sys.argv:
-    if 'TESTING' in arg:
-        var_testingmode = True
-if len(sys.argv) >= 0:
-    for arg in sys.argv:
-        print('Argument: '+str(arg))
-if len(sys.argv) > 1:
-    if '.wav' in sys.argv[1]:
-        var_audiofromfile = True
-        var_filename = str(sys.argv[1])
-    else:
-        var_secret = sys.argv[1]
-if len(sys.argv) > 2:
-    var_secret = sys.argv[2]
+@dataclass
+class Config:
+    """Configuration settings for the voice login system."""
+    audio_from_file: bool = False
+    testing_mode: bool = False
+    print_guesses: bool = True
+    filename: str = '.audio.wav'
+    secret: str = 'seven'
+    sample_rate: int = 16000
+    record_duration: int = 5
+    channels: int = 1
+    chunk_size: int = 1024
 
-def generate_md5(word):
+def parse_arguments() -> Config:
+    """Parse command line arguments and return configuration."""
+    config = Config()
+
+    if len(sys.argv) > 1:
+        for arg in sys.argv:
+            if '.wav' in arg:
+                config.audio_from_file = True
+                config.filename = arg
+            else:
+                config.secret = arg
+                logger.info('secret has changed to cli input')
+    
+    if len(sys.argv) > 2:
+        config.secret = sys.argv[2]
+        logger.info('secret has changed to cli input')
+
+    logger.info('config created')
+    return config    
+
+def generate_md5(word: str) -> str:
+    """Generate MD5 hash of input word."""
     return hashlib.md5(word.encode()).hexdigest()
 
-def check_includes_secret(input_text,secret_hash):
-    words = input_text.upper().split()
-    for word in words:
-        if generate_md5(word) == var_secret:
-            print("[SECRET] logged in with secret "+str(input_text))
-            return True
-        else:
-            continue
+def check_includes_secret(input_text: str, secret_hash: str) -> bool:
+    """Check if input text contains the secret phrase."""
+    try:
+        words = input_text.upper().split()
+        for word in words:
+            if generate_md5(word) == generate_md5(Config.secret.upper()):
+                logger.info('FOUND SECRET')
+                return True
+    except Exception as e:
+        logger.error(f"Error checking secret: {e}")
+        return False
 
-def strip_to_text_partial(text):
-    return text[17:(len(text)-3)]
+def strip_to_text_partial(text: str) -> str:
+    """Extract the text content from JSON response."""
+    try:
+        return text[17:(len(text)-3)]
+    except Exception as e:
+        logger.error(f"Error processing text: {e}")
+        return ""
 
-def record_audio(filename="audio.wav", duration=5, channels=1, rate=44100, chunk=1024):
-    audio = pyaudio.PyAudio()
-    stream = audio.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True, frames_per_buffer=chunk)
+def record_audio(config: Config) -> bool:
+    """Record audio from microphone."""
+    try:
+        audio = pyaudio.PyAudio()
+        stream = audio.open(
+            format=pyaudio.paInt16,
+            channels=config.channels,
+            rate=config.sample_rate,
+            input=True,
+            frames_per_buffer=config.chunk_size
+        )
 
-    print("Recording...")
-    frames = [stream.read(chunk) for _ in range(0, int(rate / chunk * duration))]
-    print("Recording finished.")
+        logger.info("Recording started...")
+        frames = [
+            stream.read(config.chunk_size)
+            for _ in range(0, int(config.sample_rate / config.chunk_size * config.record_duration))
+        ]
+        logger.info("Recording finished.")
 
-    stream.stop_stream()
-    stream.close()
-    audio.terminate()
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
 
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(rate)
-        wf.writeframes(b''.join(frames))
+        with wave.open(config.filename, 'wb') as wf:
+            wf.setnchannels(config.channels)
+            wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
+            wf.setframerate(config.sample_rate)
+            wf.writeframes(b''.join(frames))
 
-    print(f"[info] Audio saved as {filename}")
+        logger.info(f"Audio saved as {config.filename}")
+        return True
+    except Exception as e:
+        logger.error(f"Error recording audio: {e}")
+        return False
 
+def process_audio(config: Config, model: Model) -> bool:
+    """Process audio file and check for secret phrase."""
+    try:
+        rec = KaldiRecognizer(model, config.sample_rate)
+        
+        ffmpeg_process = subprocess.Popen(
+            [
+                "ffmpeg", "-loglevel", "quiet",
+                "-i", str(config.filename),
+                "-ar", str(config.sample_rate),
+                "-ac", "1", "-f", "s16le", "-"
+            ],
+            stdout=subprocess.PIPE
+        )
 
-SAMPLE_RATE = 16000
-SetLogLevel(0)
-model = Model(lang="en-us")
-rec = KaldiRecognizer(model, SAMPLE_RATE)
-if not var_audiofromfile:
-    print("[info] starting recording audio process")
-    record_audio() #records an audio and saves it to audio.wav, replaces if audio file already present
-    print("[info] done recording audio process")
-else:
-    print("[info] fetching audio from file...")
-    var_filename = 'file.wav'
+        while True:
+            data = ffmpeg_process.stdout.read(4000)
+            if len(data) == 0:
+                break
 
-with subprocess.Popen(["ffmpeg", "-loglevel", "quiet", "-i",
-                            str(var_filename),
-                            "-ar", str(SAMPLE_RATE) , "-ac", "1", "-f", "s16le", "-"],
-                            stdout=subprocess.PIPE) as process:
+            if rec.AcceptWaveform(data):
+                text = strip_to_text_partial(rec.Result())
+                if config.print_guesses:
+                    logger.info(f"Recognized: {text}")
+                if check_includes_secret(text, config.secret):
+                    logger.info("Secret phrase recognized!")
+                    return True
+            else:
+                text = strip_to_text_partial(rec.PartialResult())
+                if config.print_guesses and text:
+                    logger.info(f"Partial: {text}")
+                if check_includes_secret(text, config.secret):
+                    logger.info("Secret phrase recognized!")
+                    return True
 
-    while True:
-        data = process.stdout.read(4000)
-        if len(data) == 0:
-            break
-        if rec.AcceptWaveform(data):
-            text = (strip_to_text_partial(rec.Result()))
-            if var_printguesses:
-                print(text)
-            if check_includes_secret(text,var_secret):
-                print("SECRET FOUND!")
-                exit()
-            #print(rec.Result())
-        else:
-            text = (strip_to_text_partial(rec.PartialResult()))
-            if var_printguesses:
-                print(text)
-            if check_includes_secret(text, var_secret):
-                print("SECRET FOUND!")
-                exit()
-            #print(rec.PartialResult())
-    print("[SECRET] passphrase or voice not recognized")
-if not var_audiofromfile:
-    os.remove("audio.wav")
+        logger.warning("Secret phrase not recognized")
+        return False
+    except Exception as e:
+        logger.error(f"Error processing audio: {e}")
+        return False
+
+def main():
+    """Main function."""
+    config = parse_arguments()
+    
+    # Initialize Vosk
+    SetLogLevel(0)
+    if not os.path.exists("model"):
+        logger.error("Please download the model from https://alphacephei.com/vosk/models and unpack as 'model' in the current folder.")
+        sys.exit(1)
+    
+    model = Model(lang="en-us")
+    
+    # Record or use existing audio
+    if not config.audio_from_file:
+        logger.info("Starting audio recording")
+        if not record_audio(config):
+            sys.exit(1)
+    else:
+        logger.info("Using existing audio file")
+    
+    # Process audio
+    success = process_audio(config, model)
+    
+    # Cleanup
+    if not config.audio_from_file and os.path.exists(".audio.wav"):
+        os.remove(".audio.wav")
+    
+    sys.exit(0 if success else 1)
+
+if __name__ == "__main__":
+    main()
